@@ -7,10 +7,9 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/signal"
-	"syscall"
 
 	"github.com/jacobsa/go-serial/serial"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -19,12 +18,12 @@ func main() {
 		panic(err)
 	}
 
-	redis, err := InitRedis(cfg.Redis.DSN, 3)
+	redisClient, err := InitRedis(cfg.Redis.DSN, 3)
 	if err != nil {
 		panic(err)
 	}
 
-	mappingLabelFile, err := os.ReadFile("mapping_label.json")
+	mappingLabelFile, err := os.ReadFile(cfg.Mapping.LabelToCategory)
 	if err != nil {
 		panic(err)
 	}
@@ -35,7 +34,7 @@ func main() {
 		panic(err)
 	}
 
-	mappingServoFile, err := os.ReadFile("mapping_servo.json")
+	mappingServoFile, err := os.ReadFile(cfg.Mapping.CategoryToServo)
 	if err != nil {
 		panic(err)
 	}
@@ -47,10 +46,6 @@ func main() {
 	}
 
 	ctx := context.Background()
-
-	subscriber := redis.Subscribe(ctx, "object-detection")
-
-	defer subscriber.Close()
 
 	// Set up options.
 	options := serial.OpenOptions{
@@ -70,55 +65,84 @@ func main() {
 	// Make sure to close it later.
 	defer port.Close()
 
-	signalChan := make(chan os.Signal, 1)
-	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
-
+	// signalChan := make(chan os.Signal, 1)
+	// signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
 	for {
-		serialData := make([]byte, 1000)
-		n, err := port.Read(serialData)
-		if err != nil {
-			fmt.Println(n, err)
-			continue
+		isAck := false
+
+		for {
+			serialData := make([]byte, 1)
+			n, err := port.Read(serialData)
+			if err != nil {
+				panic(err)
+			}
+
+			if n <= 0 {
+				continue
+			}
+
+			if string(serialData) != "1" {
+				continue
+			}
+
+			if !isAck {
+				_, err = port.Write([]byte("1\n"))
+				if err != nil {
+					panic(err)
+				}
+				isAck = true
+			}
+
+			fmt.Println("Arduino is ready")
+			break
 		}
 
-		if n <= 0 {
-			continue
-		}
+		for {
+			value, err := redisClient.Get(ctx, cfg.Redis.Key).Result()
+			if err == redis.Nil {
+				fmt.Println("key does not exist")
+			} else if err != nil {
+				panic(err)
+			} else {
+				fmt.Println("key", value)
+			}
 
-		select {
-		case <-signalChan:
-			return
-		default:
-			fmt.Println("Waiting for message")
-		}
+			payload := value
+			fmt.Println("Payload: ", payload)
+			// payload := "bottle"
 
-		msg, err := subscriber.ReceiveMessage(ctx)
-		if err != nil {
-			log.Fatalf("failed on receiving message from redis: %v", err)
-			continue
-		}
+			labelToCategory, ok := mappingLabel[payload]
+			if !ok {
+				labelToCategory = "fiveFinger"
+			}
 
-		payload := msg.Payload
-		labelToCategory, ok := mappingLabel[payload]
-		if !ok {
-			labelToCategory = "fiveFinger"
-		}
+			servoToMove, ok := mappingServo[labelToCategory]
+			if !ok {
+				servoToMove = mappingServo["fiveFinger"]
+			}
 
-		servoToMove, ok := mappingServo[labelToCategory]
-		if !ok {
-			servoToMove = mappingServo["fiveFinger"]
-		}
+			var servoValue string
+			for idx, servo := range servoToMove {
+				if idx == len(servoToMove)-1 {
+					servoValue += fmt.Sprintf("%d", servo)
+				} else {
+					servoValue += fmt.Sprintf("%d ", servo)
+				}
+			}
 
-		var servoValue string
-		for _, servo := range servoToMove {
-			servoValue += fmt.Sprintf("%d ", servo)
-		}
+			_, err = port.Write([]byte(servoValue))
+			if err != nil {
+				log.Fatalf("failed on writing to serial: %v", err)
+				continue
+			}
 
-		reply := fmt.Sprintf("%s\n", servoValue)
-		_, err = port.Write([]byte(reply))
-		if err != nil {
-			log.Fatalf("failed on writing to serial: %v", err)
-			continue
+			_, err = port.Write([]byte("\n"))
+			if err != nil {
+				log.Fatalf("failed on writing to serial: %v", err)
+				continue
+			}
+
+			break
 		}
 	}
 }

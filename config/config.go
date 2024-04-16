@@ -8,12 +8,19 @@ import (
 )
 
 type Config struct {
-	Redis  Redis  `yaml:"redis"`
-	Serial Serial `yaml:"serial"`
+	Redis   Redis   `yaml:"redis"`
+	Serial  Serial  `yaml:"serial"`
+	Mapping Mapping `yaml:"mapping"`
 }
 
 type Redis struct {
 	DSN string `yaml:"dsn"`
+	Key string `yaml:"key"`
+}
+
+type Mapping struct {
+	LabelToCategory string `yaml:"labelToCategory"`
+	CategoryToServo string `yaml:"servoToCategory"`
 }
 
 type Serial struct {
